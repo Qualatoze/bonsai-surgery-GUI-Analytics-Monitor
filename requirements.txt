@@ -1,0 +1,8 @@
+# Bonsai 2 27B GUI — зависимости (PySide6 desktop edition)
+PySide6>=6.8.0
+matplotlib>=3.8.0
+numpy>=1.24.0
+pandas>=2.2.0
+psutil>=5.10.0
+requests>=2.31.0
+nvidia-ml-py  # NVML fallback for per-process VRAM (optional, GPU-only)
