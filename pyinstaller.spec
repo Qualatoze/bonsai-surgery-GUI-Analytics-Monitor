@@ -16,7 +16,7 @@ import os
 
 # --- Collect only lightweight data files (themes, i18n, etc.) ---
 # Do NOT include bin/ or models/ — they are large and belong next to the exe.
-project_root = os.path.dirname(os.path.abspath(__file__))
+project_root = os.getcwd()
 
 # Data files that ARE safe to bundle (small config/theme assets)
 bundled_data = []
@@ -81,7 +81,7 @@ exe = EXE(
 
 # BUG 7: onedir mode — _internal/ holds only bundled data.
 # bin/ and models/ must be placed NEXT TO the exe by the user/installer.
-coll = COLLECTEXE(
+coll = COLLECT(
     exe,
     a.binaries + a.datas,
     strip=False,

@@ -134,7 +134,7 @@ class AppConfig:
     # --- GPU / VRAM ---
     small_gpu_threshold_mib: int = 8704   # 8GB карты: 8192 MiB + запас
     vram_margin_mib: int = 1300
-    model_min_size_gb: float = 4.0
+    model_min_size_gb: float = 0.09       # принимать .gguf от ~100 МБ
 
     # --- KV / context ---
     default_context_length: int = 32768
@@ -385,7 +385,7 @@ class AppConfig:
 
         # --- float fields with ranges ---
         for fname, lo, hi in (
-            ("model_min_size_gb", 0.1, 512.0),
+            ("model_min_size_gb", 0.001, 512.0),
             ("temp", 0.0, 4.0),
             ("top_p", 0.0, 1.0),
             ("repeat_penalty", 0.0, 10.0),

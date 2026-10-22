@@ -64,7 +64,7 @@ _TAG_RE = re.compile(
 )
 
 
-def scan_models(models_dir: str | Path, min_size_gb: float = 4.0) -> list[ModelInfo]:
+def scan_models(models_dir: str | Path, min_size_gb: float = 0.09) -> list[ModelInfo]:
     """Сканирует models/ на .gguf > min_size_gb, парсит теги, находит MTP-draft."""
     d = Path(models_dir)
     if not d.exists():

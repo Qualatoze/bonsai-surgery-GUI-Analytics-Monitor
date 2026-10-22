@@ -667,8 +667,12 @@ class LaunchTab(QWidget):
                 self.model_combo.clear()
                 if not models:
                     self.model_combo.addItem("— no .gguf —", None)
+                    if self.cfg.model_min_size_gb < 1.0:
+                        threshold = f"{self.cfg.model_min_size_gb * 1024:.0f} MB"
+                    else:
+                        threshold = f"{self.cfg.model_min_size_gb:.1f} GB"
                     self.model_hint.setText(
-                        f"No .gguf > {self.cfg.model_min_size_gb} GB found in "
+                        f"No .gguf ≥ {threshold} found in "
                         f"`{self.cfg.models_dir}`")
                 else:
                     for m in models:
