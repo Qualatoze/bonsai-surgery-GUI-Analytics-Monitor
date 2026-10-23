@@ -513,7 +513,7 @@ class AnalyticsTab(QWidget):
             if ec in filtered.columns and ec not in cols:
                 cols.append(ec)
 
-        display = filtered[cols].sort_values("timestamp", ascending=False).copy()
+        display = filtered[cols].sort_values("timestamp", ascending=False).head(30).copy()
         if "cost_cny" in display.columns:
             display = display.rename(columns={"cost_cny": "cost ($)"})
         self.table_model.update(display)
