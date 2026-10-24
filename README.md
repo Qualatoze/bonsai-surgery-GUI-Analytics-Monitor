@@ -1,12 +1,13 @@
-# Bonsai GUI
-
-A PySide6 desktop control panel for [Bonsai 2 27B](https://github.com/professorpalmer/bonsai-ada-surgery) — launch, monitor, and analyze a patched `llama-server` from a native Qt window instead of juggling PowerShell flags.
-
 UI language: **RU · EN · CN**
+## 📸 Screenshots
 
-![Launch tab](https://i.imgur.com/dsdDaSw.png)
-![Monitor tab](https://i.imgur.com/SglGs3d.png)
-![Analytics tab](https://i.imgur.com/iQK6egp.png)
+| Launch | Monitor |
+| :---: | :---: |
+| <img src="https://i.imgur.com/fWX2BCf.png" width="400" alt="Launch Tab"> | <img src="https://i.imgur.com/ECtvP2U.png" width="400" alt="Monitor Tab"> |
+
+| Analytics | Settings |
+| :---: | :---: |
+| <img src="https://i.imgur.com/2JaG24Y.png" width="400" alt="Analytics Tab"> | <img src="https://i.imgur.com/tD3IEFk.png" width="400" alt="Settings Tab"> |
 
 ## Install
 
