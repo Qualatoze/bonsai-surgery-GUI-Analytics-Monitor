@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QFormLayout, QGroupBox, QGridLayout,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox, QScrollArea,
-    QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QPushButton, QMessageBox,
+    QTabWidget, QVBoxLayout, QWidget, QSpinBox, QDoubleSpinBox,
+    QScrollArea, QFrame,
 )
 
 from config import save_config
@@ -33,6 +35,7 @@ class ContextKvRow(QHBoxLayout):
         self._label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.combo = QComboBox()
+        self.combo.setFixedWidth(120)
         self.custom_edit = QLineEdit()
         self.custom_edit.setPlaceholderText("Custom value…")
         self.custom_edit.setFixedWidth(130)
@@ -78,14 +81,20 @@ class LaunchTab(QWidget):
         "spec_depth": 24576, "spec_deep": 4, "draft_window": 16384,
         "lookup_n": 32, "spec_n_max": 2,
         "kv_vram_cells": 0, "stage_cells": 0,
-        "ram_budget_cache_mib": 0, "ram_budget_ckpts": 8, "pool_mib": 42,
+        "ram_budget_cache_mib": 0, "ram_budget_ckpts": 0, "pool_mib": 42,
         "ckpt_every": 8192, "shared_pool": True,
-        "top_k": 20, "temp": 0.6, "top_p": 0.95, "repeat_penalty": 1.1,
-        "ubatch": 0, "batch_size": 0, "ngl": 999,
-        "prefill_f16": False, "fa_chunk": False, "think": True,
-        "harness_proof": False, "backend_sampling": True, "kq_mask_packed": False,
+        "top_k": 20, "temp": 1.0, "top_p": 0.95, "repeat_penalty": 1.0,
+        "ubatch": 0, "batch_size": 2048, "ngl": 999,
+        # PS1 defaults: prefill/fa_chunk/kq_mask/harness_proof are ON for the
+        # 8 GB and 12 GB presets; keep the widgets ON too so a plain launch
+        # matches PS1 (previously they were OFF → PS1 recipes were NOT applied).
+        "prefill_f16": True, "fa_chunk": True, "think": True,
+        "harness_proof": True, "backend_sampling": True, "kq_mask_packed": True,
+        "think_budget": 20480,
         "reasoning_budget_message": "Now produce the complete answer.",
         "reasoning_effort_fallback": "medium",
+        "api_key_enabled": False,           # ← NEW: matches PS1 ($ApiKey = $null)
+        "api_key_value": "",                # ← NEW: actual key (empty → fallback to api_key_path file)
     }
 
     def __init__(self, controller, parent=None) -> None:
@@ -104,6 +113,16 @@ class LaunchTab(QWidget):
         self._build_ui()
         self.controller.settings_saved.connect(self._on_settings_changed)
 
+        # Restore persisted advanced opts into the widgets. Defect: previously
+        # only self._adv_opts was restored but the widgets kept hardcoded
+        # defaults, and _read_adv_opts() reads the WIDGETS — so all advanced
+        # settings from cfg.advanced_opts were silently dropped on every start.
+        if self._adv_opts:
+            try:
+                self._write_adv_opts(self._adv_opts)
+            except Exception:
+                pass
+
         # Point 6: apply "Recent" preset from last_launch (if any).
         # Applied AFTER build_ui (widgets exist) but BEFORE async refreshes.
         if self.cfg.last_launch:
@@ -116,7 +135,7 @@ class LaunchTab(QWidget):
         run_async(
             lambda: query_gpu_snapshot(self.cfg.small_gpu_threshold_mib),
             on_done=self._on_gpu_snapshot,
-            on_error=lambda e: self.gpu_label.setText(f"⚠️ GPU query error: {e}"),
+            on_error=lambda e: sys_info_label.setText(f"⚠️ GPU query error: {e}"),
         )
         self._refresh_models()
         self._refresh_status()
@@ -125,46 +144,91 @@ class LaunchTab(QWidget):
     # UI construction — compact single-column layout for 1280×720
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(10, 6, 10, 6)
-        root.setSpacing(4)
+        # Main scroll area to prevent clipping on 1080p screens
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
 
-        # --- Top row: Preset selector + Save button ---
-        preset_row = QHBoxLayout()
-        preset_row.setSpacing(4)
+        container = QWidget()
+        root = QVBoxLayout(container)
+        root.setContentsMargins(6, 4, 6, 4)  # Уменьшили отступы
+        root.setSpacing(4)                   # Уменьшили расстояние между блоками
+
+        # --- Top row: Preset + Save + Start/Stop ---
+        top_row = QHBoxLayout()
+        top_row.setSpacing(6)
+
         self.preset_combo = QComboBox()
+        self.preset_combo.setMinimumWidth(150)
         self._populate_presets()
         self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
-        preset_row.addWidget(QLabel(t("launch.preset")))
-        preset_row.addWidget(self.preset_combo)
+
+        top_row.addWidget(QLabel(t("launch.preset")))
+        top_row.addWidget(self.preset_combo)
 
         save_btn = QPushButton(t("launch.save_preset"))
         save_btn.clicked.connect(self._save_preset)
-        preset_row.addWidget(save_btn)
-        root.addLayout(preset_row)
+        top_row.addWidget(save_btn)
 
-        # --- GPU / RAM info (compact, 2 lines) ---
-        self.gpu_label = QLabel("—")
-        self.gpu_label.setWordWrap(True)
-        self.ram_label = QLabel("—")
-        self.ram_label.setWordWrap(True)
-        root.addWidget(self.gpu_label)
-        root.addWidget(self.ram_label)
+        top_row.addStretch(1)
 
-        # --- Model selection ---
-        root.addWidget(SectionTitle(t("launch.model")))
-        model_row = QHBoxLayout()
+        self.start_btn = QPushButton(t("launch.start_server"))
+        self.start_btn.setProperty("role", "primary")
+        self.start_btn.setMinimumWidth(120)
+        self.start_btn.clicked.connect(self._on_start)
+        top_row.addWidget(self.start_btn)
+
+        self.stop_btn = QPushButton(t("launch.stop_server"))
+        self.stop_btn.setProperty("role", "danger")
+        self.stop_btn.setMinimumWidth(120)
+        self.stop_btn.clicked.connect(self._on_stop)
+        top_row.addWidget(self.stop_btn)
+
+        root.addLayout(top_row)
+
+        # --- Status & Info row (compact) ---
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("\u2014")
+        self.info_label = QLabel("")
+        self.info_label.setWordWrap(False)  # Запрещаем перенос строк
+        self.lan_hint = HintLabel("")
+        self.lan_hint.setStyleSheet("font-size: 11px; color: #6C5CE7;")
+        self.lan_hint.setWordWrap(True)  # Разрешаем перенос
+
+        self.error_label = QLabel("")
+        self.error_label.setProperty("role", "err")
+
+        status_row.addWidget(self.status_label)
+        status_row.addWidget(self.info_label)
+        status_row.addStretch(1)
+
+        root.addLayout(status_row)
+
+        # Выносим отдельно, чтобы не сжимался кнопками
+        root.addWidget(self.lan_hint)
+        root.addWidget(self.error_label)
+
+        # --- GPU / RAM info (merged into 1 label) ---
+        self.sys_info_label = QLabel("\u2014")
+        root.addWidget(self.sys_info_label)
+
+        # --- Model & Context/KV in a Grid ---
+        grid = QGridLayout()
+        grid.setSpacing(6)
+
+        grid.addWidget(QLabel(t("launch.model")), 0, 0)
         self.model_combo = QComboBox()
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        grid.addWidget(self.model_combo, 0, 1, 1, 3)
+
         rescan_btn = QPushButton(t("launch.rescan"))
         rescan_btn.clicked.connect(self._refresh_models)
-        model_row.addWidget(self.model_combo, stretch=1)
-        model_row.addWidget(rescan_btn)
-        root.addLayout(model_row)
-        self.model_hint = HintLabel("")
-        root.addWidget(self.model_hint)
+        grid.addWidget(rescan_btn, 0, 4)
 
-        # --- Context length row (ContextKvRow pattern) ---
+        self.model_hint = HintLabel("")
+        grid.addWidget(self.model_hint, 1, 0, 1, 5)
+
+        # Context row
         ctx_row = ContextKvRow(t("launch.context_length"))
         for c in (32768, 65536, 131072, 262144):
             ctx_row.combo.addItem(str(c), c)
@@ -172,192 +236,294 @@ class LaunchTab(QWidget):
         if idx >= 0:
             ctx_row.combo.setCurrentIndex(idx)
         self.ctx_row = ctx_row
-        root.addLayout(ctx_row)
+        grid.addLayout(ctx_row, 2, 0, 1, 2)
 
-        # --- KV cache type row (ContextKvRow pattern) ---
+        # KV row
         kv_row = ContextKvRow(t("launch.kv_cache"))
         for kv in ("q8_0", "q5_0", "q4_0", "f16"):
             kv_row.combo.addItem(kv, kv)
         if self.cfg.default_kv_cache_type in ("q8_0", "q5_0", "q4_0", "f16"):
             kv_row.combo.setCurrentText(self.cfg.default_kv_cache_type)
         self.kv_row = kv_row
-        root.addLayout(kv_row)
+        grid.addLayout(kv_row, 2, 2, 1, 3)
 
-        # --- MTP toggle ---
+        # MTP toggle & TKC value
         mtp_row = QHBoxLayout()
-        mtp_row.setSpacing(4)
         self.mtp_switch = QCheckBox(t("launch.mtp"))
-        self.mtp_switch.toggled.connect(
-            lambda _: self._update_tkc(self.model_combo.currentData()))
+        self.mtp_switch.toggled.connect(lambda _: self._update_tkc(self.model_combo.currentData()))
         mtp_row.addWidget(self.mtp_switch)
-        root.addLayout(mtp_row)
 
-        # TKC depends on ctx and kv, so recompute on change
-        self.ctx_row.combo.currentIndexChanged.connect(
-            lambda _: self._update_tkc(self.model_combo.currentData()))
-        self.ctx_row.custom_edit.textChanged.connect(
-            lambda _: self._update_tkc(self.model_combo.currentData()))
-        self.kv_row.combo.currentIndexChanged.connect(
-            lambda _: self._update_tkc(self.model_combo.currentData()))
+        mtp_row.addStretch(1)
+        self.tkc_value_label = QLabel("\u2014")
+        self.tkc_value_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #00D2FF;")
+        mtp_row.addWidget(QLabel(t("launch.tkc_title") + ":"))
+        mtp_row.addWidget(self.tkc_value_label)
 
-        # --- TKC KPI card ---
-        tkc_card = KpiCard(t("launch.tkc_title"))
-        self.tkc_value_label = tkc_card._value
-        self.tkc_value_label.setStyleSheet(
-            "font-size: 16px; font-weight: bold;"
-        )
-        root.addWidget(tkc_card)
+        grid.addLayout(mtp_row, 3, 0, 1, 5)
+        root.addLayout(grid)
 
-        # --- Status / Start / Stop section ---
-        root.addSpacing(4)
-        root.addWidget(SectionTitle(t("status.running")))
-        self.status_label = QLabel("—")
-        self.status_label.setWordWrap(True)
-        root.addWidget(self.status_label)
+        # TKC recompute triggers
+        self.ctx_row.combo.currentIndexChanged.connect(lambda _: self._update_tkc(self.model_combo.currentData()))
+        self.ctx_row.custom_edit.textChanged.connect(lambda _: self._update_tkc(self.model_combo.currentData()))
+        self.kv_row.combo.currentIndexChanged.connect(lambda _: self._update_tkc(self.model_combo.currentData()))
 
-        self.info_label = QLabel("")
-        self.info_label.setWordWrap(True)
-        root.addWidget(self.info_label)
-
-        # FIX #4: LAN URL hint (shown when server is running)
-        self.lan_hint = HintLabel("")
-        root.addWidget(self.lan_hint)
-
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(4)
-        self.start_btn = QPushButton(t("launch.start_server"))
-        self.start_btn.setProperty("role", "primary")
-        self.start_btn.clicked.connect(self._on_start)
-        btn_row.addWidget(self.start_btn)
-
-        self.stop_btn = QPushButton(t("launch.stop_server"))
-        self.stop_btn.setProperty("role", "danger")
-        self.stop_btn.clicked.connect(self._on_stop)
-        btn_row.addWidget(self.stop_btn)
-        root.addLayout(btn_row)
-
-        self.error_label = QLabel("")
-        self.error_label.setProperty("role", "err")
-        self.error_label.setWordWrap(True)
-        self.error_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        root.addWidget(self.error_label)
-
-        # --- Inline advanced settings (two-column scrollable layout) ---
+        # --- Advanced Settings ---
         root.addSpacing(4)
         root.addWidget(SectionTitle(t("launch.advanced_settings")))
-        self._build_advanced_inline()
+        self._build_advanced_inline(root)
 
-    def _build_advanced_inline(self) -> None:
-        """Build inline two-column advanced settings in a QScrollArea."""
-        # Widget storage
-        self._adv_int_edits: dict[str, QLineEdit] = {}
+        scroll.setWidget(container)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.addWidget(scroll)
+    def _build_advanced_inline(self, target_layout=None) -> None:
+        """Compact 3-column layout for advanced settings (no tabs)."""
+        self._adv_int_edits: dict[str, QSpinBox] = {}
         self._adv_float_edits: dict[str, QLineEdit] = {}
         self._adv_bool_checks: dict[str, QCheckBox] = {}
+        self._adv_combo_edits: dict[str, QComboBox] = {}
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setContentsMargins(0, 0, 0, 0)
+        main_layout = QHBoxLayout()
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
-        inner_widget = QWidget()
-        outer_layout = QVBoxLayout(inner_widget)
-        outer_layout.setContentsMargins(12, 12, 12, 12)
-        outer_layout.setSpacing(15)
+        def _make_col():
+            w = QWidget()
+            v = QVBoxLayout(w)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(10)
+            return w, v
 
-        def _make_group(title: str):
-            g = QGroupBox(title)
-            f = QFormLayout(g)
-            f.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-            f.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-            f.setHorizontalSpacing(15)
-            f.setVerticalSpacing(8)
-            g.setContentsMargins(12, 16, 12, 10)
-            return g, f
+        def add_int(name: str, default: int, grid: QGridLayout, row: int):
+            spin = QSpinBox()
+            spin.setRange(0, 1048576)
+            spin.setValue(default)
+            spin.setFixedWidth(110)
+            spin.setFixedHeight(22)
+            spin.setToolTip(t(f"adv.tooltip.{name}"))
+            self._adv_int_edits[name] = spin
+            grid.addWidget(QLabel(t(f"adv.{name}")), row, 0)
+            grid.addWidget(spin, row, 1)
+            grid.setColumnStretch(2, 1)
 
-        def add_int(name: str, default: int, form):
+        def add_float(name: str, default: float, grid: QGridLayout, row: int):
             edit = QLineEdit(str(default))
-            edit.setToolTip(t(f"adv.tooltip.{name}"))
-            self._adv_int_edits[name] = edit
-            form.addRow(t(f"adv.{name}"), edit)
-
-        def add_float(name: str, default: float, form):
-            edit = QLineEdit(str(default))
+            edit.setFixedWidth(110)
+            edit.setFixedHeight(22)
+            edit.setStyleSheet("padding: 1px 6px;")
             edit.setToolTip(t(f"adv.tooltip.{name}"))
             self._adv_float_edits[name] = edit
-            form.addRow(t(f"adv.{name}"), edit)
+            grid.addWidget(QLabel(t(f"adv.{name}")), row, 0)
+            grid.addWidget(edit, row, 1)
 
-        def add_bool(name: str, default: bool, form):
+        def add_bool(name: str, default: bool, grid: QGridLayout, row: int, col: int = 0):
             check = QCheckBox(t(f"adv.{name}"))
             check.setChecked(default)
             check.setToolTip(t(f"adv.tooltip.{name}"))
             self._adv_bool_checks[name] = check
-            form.addRow("", check)
+            grid.addWidget(check, row, col, 1, 2)
 
-        # --- Group 1: Speculative Decoding ---
-        g_spec, f_spec = _make_group(t("adv.group.spec_decoding"))
-        add_int("spec_depth", 24576, f_spec)
-        add_int("spec_deep", 4, f_spec)
-        add_int("draft_window", 16384, f_spec)
-        add_int("lookup_n", 32, f_spec)
-        outer_layout.addWidget(g_spec)
+        # ===== COLUMN 1: Spec & Sampling =====
+        col1, v1 = _make_col()
 
-        # --- Group 2: Memory & KV Cache ---
-        g_mem, f_mem = _make_group(t("adv.group.memory_kv"))
-        add_int("kv_vram_cells", 0, f_mem)
-        add_int("stage_cells", 0, f_mem)
-        add_int("ram_budget_cache_mib", 0, f_mem)
-        add_int("ram_budget_ckpts", 8, f_mem)
-        add_int("pool_mib", 42, f_mem)
-        add_int("ckpt_every", 8192, f_mem)
-        add_bool("shared_pool", True, f_mem)
-        outer_layout.addWidget(g_mem)
+        gb_spec = QGroupBox(t("adv.group.spec_decoding"))
+        grid_spec = QGridLayout(gb_spec)
+        grid_spec.setSpacing(6)
+        add_int("spec_depth", 24576, grid_spec, 0)
+        add_int("spec_deep", 4, grid_spec, 1)
+        add_int("draft_window", 16384, grid_spec, 2)
+        add_int("lookup_n", 32, grid_spec, 3)
+        v1.addWidget(gb_spec)
 
-        # --- Group 3: Sampling ---
-        g_samp, f_samp = _make_group(t("adv.group.sampling"))
-        add_int("top_k", 20, f_samp)
-        add_float("temp", 0.6, f_samp)
-        add_float("top_p", 0.95, f_samp)
-        add_float("repeat_penalty", 1.1, f_samp)
-        outer_layout.addWidget(g_samp)
+        gb_sampling = QGroupBox(t("adv.group.sampling"))
+        grid_sampling = QGridLayout(gb_sampling)
+        grid_sampling.setSpacing(6)
+        add_int("top_k", 20, grid_sampling, 0)
+        add_float("temp", 1.0, grid_sampling, 1)
+        add_float("top_p", 0.95, grid_sampling, 2)
+        add_float("repeat_penalty", 1.0, grid_sampling, 3)
+        v1.addWidget(gb_sampling)
 
-        # --- Group 4: Batch & Compute ---
-        g_batch, f_batch = _make_group(t("adv.group.batch_compute"))
-        add_int("ubatch", 0, f_batch)
-        add_int("batch_size", 0, f_batch)
-        add_int("ngl", 999, f_batch)
-        add_bool("prefill_f16", False, f_batch)
-        add_bool("fa_chunk", False, f_batch)
-        add_bool("think", True, f_batch)
-        add_bool("harness_proof", False, f_batch)
-        add_bool("backend_sampling", True, f_batch)
-        add_bool("kq_mask_packed", False, f_batch)
-        outer_layout.addWidget(g_batch)
+        # ===== COLUMN 2: Memory & Batch =====
+        col2, v2 = _make_col()
 
-        # --- Group 5: Other ---
-        g_other, f_other = _make_group(t("adv.group.other"))
-        self._extra_args_edit = QLineEdit()
-        self._extra_args_edit.setPlaceholderText("")
-        f_other.addRow(t("launch.extra_args"), self._extra_args_edit)
+        gb_mem = QGroupBox(t("adv.group.memory_kv"))
+        grid_mem = QGridLayout(gb_mem)
+        grid_mem.setSpacing(6)
+        add_int("kv_vram_cells", 0, grid_mem, 0)
+        add_int("stage_cells", 0, grid_mem, 1)
+        add_int("ram_budget_cache", 0, grid_mem, 2)
+        add_int("ram_budget_ckpts", 8, grid_mem, 3)
+        add_int("pool_mib", 42, grid_mem, 4)
+        add_int("ckpt_every", 8192, grid_mem, 5)
+        add_bool("shared_pool", True, grid_mem, 6)
+        v2.addWidget(gb_mem)
+
+        gb_batch = QGroupBox(t("adv.group.batch_compute"))
+        grid_batch = QGridLayout(gb_batch)
+        grid_batch.setSpacing(4)
+
+        add_int("ubatch", 0, grid_batch, 0)
+        add_int("batch_size", 2048, grid_batch, 1)
+        add_int("ngl", 999, grid_batch, 2)
+        # Чекбоксы в две колонки (экономия ~3 строк)
+        add_bool("prefill_f16", True, grid_batch, 3, col=0)
+        add_bool("fa_chunk", True, grid_batch, 3, col=2)
+        add_bool("think", True, grid_batch, 4, col=0)
+        add_bool("harness_proof", True, grid_batch, 4, col=2)
+        add_bool("backend_sampling", True, grid_batch, 5, col=0)
+        add_bool("kq_mask_packed", True, grid_batch, 5, col=2)
+
+        v2.addWidget(gb_batch)
+
+        # ===== COLUMN 3: Other / Paths / API =====
+        col3, v3 = _make_col()
+
+        gb_other = QGroupBox(t("adv.group.other"))
+        form_other = QFormLayout(gb_other)
+        form_other.setSpacing(6)
+        form_other.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+
+        self._effort_combo = QComboBox()
+        for val in ("low", "medium", "high", "xhigh"):
+            self._effort_combo.addItem(val, val)
+        idx = self._effort_combo.findText(getattr(self.cfg, "effort_mode", "medium"))
+        if idx >= 0:
+            self._effort_combo.setCurrentIndex(idx)
+        form_other.addRow(t("adv.effort_mode"), self._effort_combo)
+        self._adv_combo_edits["effort_mode"] = self._effort_combo
+
+        self._force_8gb_combo = QComboBox()
+        self._force_8gb_combo.addItem("Auto", -1)
+        self._force_8gb_combo.addItem("Force 8 GB preset", 1)
+        self._force_8gb_combo.addItem("Never 8 GB preset", 0)
+        idx = self._force_8gb_combo.findData(getattr(self.cfg, "force_8gb", -1))
+        if idx >= 0:
+            self._force_8gb_combo.setCurrentIndex(idx)
+        form_other.addRow(t("adv.force_8gb"), self._force_8gb_combo)
+        self._adv_combo_edits["force_8gb"] = self._force_8gb_combo
+
+        self._sparse_combo = QComboBox()
+        self._sparse_combo.addItem("Auto", -1)
+        self._sparse_combo.addItem("Force sparse", 1)
+        self._sparse_combo.addItem("Disable", 0)
+        idx = self._sparse_combo.findData(getattr(self.cfg, "sparse_mode", -1))
+        if idx >= 0:
+            self._sparse_combo.setCurrentIndex(idx)
+        form_other.addRow(t("adv.sparse_mode"), self._sparse_combo)
+        self._adv_combo_edits["sparse_mode"] = self._sparse_combo
+
+        self._rs_replay_combo = QComboBox()
+        self._rs_replay_combo.addItem("Auto", -1)
+        self._rs_replay_combo.addItem("Force on", 1)
+        self._rs_replay_combo.addItem("Off", 0)
+        idx = self._rs_replay_combo.findData(getattr(self.cfg, "rs_replay_mode", -1))
+        if idx >= 0:
+            self._rs_replay_combo.setCurrentIndex(idx)
+        form_other.addRow(t("adv.rs_replay_mode"), self._rs_replay_combo)
+        self._adv_combo_edits["rs_replay_mode"] = self._rs_replay_combo
+
+        spin_tb = QSpinBox()
+        spin_tb.setRange(0, 1048576)
+        spin_tb.setValue(int(self.cfg.think_budget or 20480))
+        spin_tb.setFixedWidth(100)
+        self._adv_int_edits["think_budget"] = spin_tb
+        form_other.addRow(t("adv.think_budget"), spin_tb)
 
         self._reasoning_msg_edit = QLineEdit()
         self._reasoning_msg_edit.setPlaceholderText("Now produce the complete answer.")
-        f_other.addRow(t("adv.reasoning_budget_message"), self._reasoning_msg_edit)
+        form_other.addRow(t("adv.reasoning_budget_message"), self._reasoning_msg_edit)
 
         self._reasoning_fallback_edit = QLineEdit()
         self._reasoning_fallback_edit.setPlaceholderText("medium")
-        f_other.addRow(t("adv.reasoning_effort_fallback"), self._reasoning_fallback_edit)
-        outer_layout.addWidget(g_other)
+        form_other.addRow(t("adv.reasoning_effort_fallback"), self._reasoning_fallback_edit)
 
-        scroll.setWidget(inner_widget)
-        self.layout().addWidget(scroll)
+        v3.addWidget(gb_other)
+
+        gb_paths = QGroupBox("Paths & API")
+        form_paths = QFormLayout(gb_paths)
+        form_paths.setSpacing(6)
+        form_paths.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+
+        self._extra_args_edit = QLineEdit()
+        form_paths.addRow(t("launch.extra_args"), self._extra_args_edit)
+
+        # --- Multimodal / slot / layer (LT-7) ---
+        self._mmproj_edit = QLineEdit()
+        self._mmproj_edit.setMaximumWidth(350)  # Увеличили, чтобы путь читался целиком
+        self._mmproj_edit.setPlaceholderText("mmproj .gguf path (blank = off)")
+        mmproj_row = QHBoxLayout()
+        mmproj_row.addWidget(self._mmproj_edit, stretch=0)
+        self._mmproj_browse_btn = QPushButton("\u2026")
+        self._mmproj_browse_btn.setFixedWidth(32)
+        self._mmproj_browse_btn.setToolTip("Browse for mmproj file")
+        mmproj_row.addWidget(self._mmproj_browse_btn)
+        form_paths.addRow(t("adv.mmproj_path"), mmproj_row)
+
+        self._mmproj_gpu_check = QCheckBox("offload mmproj to GPU")
+        form_paths.addRow("", self._mmproj_gpu_check)
+
+        self._slot_save_edit = QLineEdit()
+        self._slot_save_edit.setMaximumWidth(350)  # Увеличили, чтобы путь читался целиком
+        self._slot_save_edit.setPlaceholderText("slot-save-path (blank = off)")
+        form_paths.addRow(t("adv.slot_save_path"), self._slot_save_edit)
+
+        self._layer_check = QCheckBox(t("adv.layer_enabled"))
+        form_paths.addRow("", self._layer_check)
+        add_int("layer_inner_port", int(getattr(self.cfg, "layer_inner_port", 0)), grid_mem, 99)
+
+        # --- API key (opt-in; matches start-server.ps1 default) ---
+        self._api_key_enabled_check = QCheckBox("\u2764 Require API key")
+        form_paths.addRow("", self._api_key_enabled_check)
+
+        self._api_key_row = QWidget()
+        api_key_layout = QHBoxLayout(self._api_key_row)
+        api_key_layout.setContentsMargins(0, 0, 0, 0)
+        api_key_layout.setSpacing(4)
+        self._api_key_edit = QLineEdit()
+        self._api_key_edit.setPlaceholderText("auto-generated")
+        api_key_layout.addWidget(self._api_key_edit, stretch=1)
+        self._api_key_gen_btn = QPushButton("\u2764")
+        self._api_key_gen_btn.setFixedWidth(32)
+        api_key_layout.addWidget(self._api_key_gen_btn)
+        self._api_key_row.setVisible(False)
+        form_paths.addRow("API key", self._api_key_row)
+
+        self._api_key_enabled_check.toggled.connect(self._on_api_key_enabled_toggled)
+        self._api_key_gen_btn.clicked.connect(self._generate_api_key)
+        v3.addWidget(gb_paths)
+
+        # Wire up browse / change handlers (LT-7)
+        self._mmproj_browse_btn.clicked.connect(lambda _: self._browse_mmproj())
+        self._mmproj_edit.textChanged.connect(self._on_mmproj_changed)
+        self._slot_save_edit.textChanged.connect(self._on_slot_changed)
+        self._layer_check.toggled.connect(self._on_layer_toggled)
+
+        # Убираем раздутые отступы QGroupBox у всех групп Advanced Settings
+        for gb in (gb_spec, gb_sampling, gb_mem, gb_batch, gb_other, gb_paths):
+            gb.setStyleSheet("QGroupBox { font-weight: bold; margin-top: 0px; padding-top: 14px; }")
+
+        # Убираем setMaximumWidth, чтобы блоки заняли всю ширину экрана
+
+        # Добавляем колонки с коэффициентом растяжения (1)
+        main_layout.addWidget(col1, 1)
+        main_layout.addWidget(col2, 1)
+        main_layout.addWidget(col3, 1)
+
+        main_layout.setAlignment(Qt.AlignTop)
+
+        wrapper = QWidget()
+        wrapper.setLayout(main_layout)
+        if target_layout is not None:
+            target_layout.addWidget(wrapper)
+        else:
+            self.layout().addWidget(wrapper)
 
     def _read_adv_opts(self) -> dict:
         """Read all inline advanced settings into a dict."""
         opts = {}
-        for name, edit in self._adv_int_edits.items():
-            try:
-                opts[name] = int(edit.text().strip() or "0")
-            except ValueError:
-                pass
+        for name, spin in self._adv_int_edits.items():
+            opts[name] = spin.value()
         for name, edit in self._adv_float_edits.items():
             try:
                 opts[name] = float(edit.text().strip() or "0.0")
@@ -365,28 +531,121 @@ class LaunchTab(QWidget):
                 pass
         for name, check in self._adv_bool_checks.items():
             opts[name] = check.isChecked()
+        # LT-3: read the PS1-parity combo selectors.
+        for name, combo in self._adv_combo_edits.items():
+            opts[name] = combo.currentData()
+        # LT-7: multimodal / slot / layer widgets.
+        opts["mmproj_path"] = self._mmproj_edit.text().strip()
+        opts["mmproj_gpu"] = self._mmproj_gpu_check.isChecked()
+        opts["slot_save_path"] = self._slot_save_edit.text().strip()
+        opts["layer_enabled"] = self._layer_check.isChecked()
+        # LT-3: mirror config-level PS1 parity fields into opts (fallback for
+        # prepare_launch when a widget value is empty).
+        for fname in ("force_8gb", "sparse_mode", "rs_replay_mode"):
+            if opts.get(fname) is None:
+                opts[fname] = getattr(self.cfg, fname, -1)
         opts["extra_args"] = self._extra_args_edit.text()
         opts["reasoning_budget_message"] = self._reasoning_msg_edit.text().strip()
         opts["reasoning_effort_fallback"] = self._reasoning_fallback_edit.text().strip() or "medium"
+        opts["api_key_enabled"] = self._api_key_enabled_check.isChecked()
+        opts["api_key_value"] = self._api_key_edit.text().strip()
         return opts
 
     def _write_adv_opts(self, opts: dict) -> None:
         """Write a dict of advanced settings into the inline widgets."""
-        for name, edit in self._adv_int_edits.items():
+        for name, spin in self._adv_int_edits.items():
             if name in opts:
-                edit.setText(str(opts[name]))
+                try:
+                    spin.setValue(int(opts[name]))
+                except (ValueError, TypeError):
+                    pass
         for name, edit in self._adv_float_edits.items():
             if name in opts:
                 edit.setText(str(opts[name]))
         for name, check in self._adv_bool_checks.items():
             if name in opts:
                 check.setChecked(bool(opts[name]))
+        # LT-3: sync the PS1-parity combo selectors.
+        for name, combo in self._adv_combo_edits.items():
+            if name in opts and opts[name] is not None:
+                idx = combo.findData(opts[name])
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        # LT-7: sync multimodal / slot / layer widgets.
+        if "mmproj_path" in opts:
+            self._mmproj_edit.setText(str(opts["mmproj_path"]))
+        if "mmproj_gpu" in opts:
+            self._mmproj_gpu_check.setChecked(bool(opts["mmproj_gpu"]))
+        if "slot_save_path" in opts:
+            self._slot_save_edit.setText(str(opts["slot_save_path"]))
+        if "layer_enabled" in opts:
+            self._layer_check.setChecked(bool(opts["layer_enabled"]))
+        if "api_key_enabled" in opts:
+            self._api_key_enabled_check.setChecked(bool(opts["api_key_enabled"]))
+        if "api_key_value" in opts:
+            self._api_key_edit.setText(str(opts["api_key_value"]))
         if "extra_args" in opts:
             self._extra_args_edit.setText(opts["extra_args"])
         if "reasoning_budget_message" in opts:
             self._reasoning_msg_edit.setText(opts["reasoning_budget_message"])
         if "reasoning_effort_fallback" in opts:
             self._reasoning_fallback_edit.setText(opts["reasoning_effort_fallback"])
+
+    def _on_api_key_enabled_toggled(self, checked: bool) -> None:
+        """Show/hide the key field. Auto-generate when enabling with empty field."""
+        self._api_key_row.setVisible(checked)
+        if checked and not self._api_key_edit.text().strip():
+            self._generate_api_key()
+
+    def _generate_api_key(self) -> None:
+        """Fill the field with a strong random key (URL-safe, 32 chars)."""
+        import secrets
+        self._api_key_edit.setText(secrets.token_urlsafe(24))
+        self._api_key_edit.setCursorPosition(0)
+
+    # ------------------------------------------------------------------
+    # Multimodal / slot / layer helpers (LT-7)
+    # ------------------------------------------------------------------
+    def _browse_mmproj(self) -> None:
+        """Open a file picker for the mmproj .gguf."""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self, "mmproj", str(Path(self.cfg.project_root)),
+            "GGUF files (*.gguf);;All files (*)")
+        if path:
+            self._mmproj_edit.setText(path)
+            self._on_mmproj_changed()
+
+    def _on_mmproj_changed(self) -> None:
+        """Persist mmproj path + GPU offload choice from Tab 5."""
+        try:
+            self.cfg.mmproj_path = self._mmproj_edit.text().strip()
+            self.cfg.mmproj_gpu = self._mmproj_gpu_check.isChecked()
+            save_config(self.cfg)
+        except Exception:
+            pass
+
+    def _on_slot_changed(self) -> None:
+        """Persist slot-save-path from Tab 5."""
+        try:
+            self.cfg.slot_save_path = self._slot_save_edit.text().strip()
+            save_config(self.cfg)
+        except Exception:
+            pass
+
+    def _on_layer_toggled(self, checked: bool) -> None:
+        """Persist layer proxy enable + inner port from Tab 5."""
+        try:
+            self.cfg.layer_enabled = checked
+            port_edit = self._adv_int_edits.get("layer_inner_port")
+            if port_edit is not None:
+                try:
+                    self.cfg.layer_inner_port = int(port_edit.text().strip() or "0")
+                except ValueError:
+                    pass
+            save_config(self.cfg)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Presets
@@ -479,7 +738,7 @@ class LaunchTab(QWidget):
                 "prefill_f16": True,      # binary default = enabled (+9-26% prefill speedup)
                 "fa_chunk": True,         # binary default = enabled
                 "think": True,            # thinking on (medium is the coding default)
-                "effort": "medium",       # harness-proofing: safe for all clients
+                "effort_mode": "medium",  # harness-proofing: safe for all clients
                 "think_budget": 24576,    # reasoning-max-tokens-floor
                 "harness_proof": True,    # --reasoning-effort-allow medium + floor
                 "backend_sampling": False,
@@ -501,7 +760,7 @@ class LaunchTab(QWidget):
                 "prefill_f16": True,      # binary default = enabled (+9-26% prefill speedup)
                 "fa_chunk": True,         # binary default = enabled
                 "think": True,
-                "effort": "medium",       # harness-proofing: safe for all clients
+                "effort_mode": "medium",  # harness-proofing: safe for all clients
                 "think_budget": 24576,    # reasoning-max-tokens-floor
                 "harness_proof": True,    # keep client compatibility (Cline/Kilo/OWebUI)
                 "backend_sampling": False,
@@ -564,6 +823,10 @@ class LaunchTab(QWidget):
                 k: v for k, v in opts.items()
                 if k not in ("context_length", "kv_cache_type", "ngl", "batch_size")
             })
+            # CRITICAL: push the preset into the actual widgets. Without this,
+            # _read_adv_opts() (which reads widgets, not self._adv_opts) still
+            # returned the hardcoded defaults, and every preset value was lost.
+            self._write_adv_opts(self._adv_opts)
             # Persist the resolved advanced configuration so it survives restart.
             self.cfg.advanced_opts = dict(self._adv_opts)
             save_config(self.cfg)
@@ -630,7 +893,7 @@ class LaunchTab(QWidget):
         run_async(
             lambda: query_gpu_snapshot(self.cfg.small_gpu_threshold_mib),
             on_done=self._on_gpu_snapshot,
-            on_error=lambda e: self.gpu_label.setText(f"⚠️ GPU query error: {e}"),
+            on_error=lambda e: sys_info_label.setText(f"⚠️ GPU query error: {e}"),
         )
 
     def _on_gpu_snapshot(self, snap) -> None:
@@ -638,24 +901,53 @@ class LaunchTab(QWidget):
         gpus = snap["gpus"]
         self._gpu = gpus[0] if gpus else None
 
+        gpu_text = "⚠️ nvidia-smi unavailable"
         if self._gpu:
-            self.gpu_label.setText(
-                f"<b>{self._gpu.name}</b> · VRAM "
-                f"{self._gpu.used_mib}/{self._gpu.total_mib} MiB · "
-                f"free <b>{self._gpu.free_mib} MiB</b>")
-        else:
-            self.gpu_label.setText(
-                "⚠️ nvidia-smi unavailable — VRAM planning limited")
+            gpu_text = (f"<b>{self._gpu.name}</b> · VRAM "
+                        f"{self._gpu.used_mib}/{self._gpu.total_mib} MiB · "
+                        f"free <b>{self._gpu.free_mib} MiB</b>")
 
         ram_info = compute_ram_budget(self.cfg)
         pc_bytes = ram_info.get("prompt_cache_bytes")
         pc_mib = int(pc_bytes / (1024 * 1024)) if pc_bytes else 0
         ck = ram_info.get("checkpoint_count", 0)
-        self.ram_label.setText(
-            f"RAM: <b>{ram_info['total_gb']:.1f} GB</b> total · "
-            f"<b>{ram_info['free_gb']:.1f} GB</b> free · "
-            f"prompt cache <code>{pc_mib if pc_mib else 'default'} MiB</code> · "
-            f"checkpoints <code>{ck if ck else 'default'}</code>")
+        ram_text = (f"RAM: <b>{ram_info['total_gb']:.1f} GB</b> total · "
+                    f"<b>{ram_info['free_gb']:.1f} GB</b> free · "
+                    f"cache <code>{pc_mib if pc_mib else 'default'} MiB</code> · "
+                    f"ckpt <code>{ck if ck else 'default'}</code>")
+
+        self.sys_info_label.setText(f"{gpu_text} | {ram_text}")
+
+        self._apply_auto_heuristics()
+
+    def _apply_auto_heuristics(self) -> None:
+        """LT-4: PS1-equivalent auto-tuning of advanced widgets after GPU/model change.
+
+        Only fills values that are still at their 'auto' defaults (0 / -1),
+        never overrides explicit user choices."""
+        if self._gpu is None:
+            return
+
+        total_mib = int(self._gpu.total_mib)
+        small_card = total_mib <= 8704
+
+        # spec_deep: PS1 uses 1 on small cards, 4 on large
+        if small_card:
+            edit = self._adv_int_edits.get("spec_deep")
+            if edit is not None and int(edit.text().strip() or "0") == 0:
+                edit.setText("1")
+
+        # stage_cells: PS1 uses partial staging (81920) on small cards only
+        if small_card:
+            edit = self._adv_int_edits.get("stage_cells")
+            if edit is not None and int(edit.text().strip() or "0") == 0:
+                edit.setText("81920")
+
+        # spec_n_max: PS1 limits to 1 on small cards when MTP is active
+        if small_card and self.mtp_switch.isChecked():
+            edit = self._adv_int_edits.get("spec_n_max")
+            if edit is not None and int(edit.text().strip() or "0") == 0:
+                edit.setText("1")
 
     def _refresh_models(self) -> None:
         """Rescan models. Crash-proof: signals are always released in finally."""
@@ -739,6 +1031,8 @@ class LaunchTab(QWidget):
 
             # Update TKC card
             self._update_tkc(m)
+            # LT-5: re-tune advanced widgets for the new model's MTP state.
+            self._apply_auto_heuristics()
 
             # H7: persist last selection to config for next launch
             try:
@@ -858,14 +1152,10 @@ class LaunchTab(QWidget):
             info = None
         if info:
             self.status_label.setText(
-                f'<span style="color:#2ecc71">● Running · '
-                f'PID <b>{info.pid}</b></span>')
+                f'<span style="color:#2ecc71">● Running</span>')
             self.info_label.setText(
-                f"model <code>{info.model_name}</code> · "
-                f"ctx <code>{info.ctx_size}</code> · "
-                f"kv <code>{info.kv_type}</code> · "
-                f"started "
-                f"{datetime.fromtimestamp(info.started_at).strftime('%H:%M:%S')}")
+                f'PID {info.pid} · {info.model_name} · '
+                f'ctx {info.ctx_size} · kv {info.kv_type}')
             self._set_state("running")
 
             # FIX #4: show LAN URLs when server is running
@@ -940,13 +1230,16 @@ class LaunchTab(QWidget):
             if auto_kv_cells is not None and auto_kv_cells > 0:
                 opts["kv_vram_cells"] = auto_kv_cells
 
-        # H5: PS1 logic — small GPU (≤8704 MiB) gets reduced spec params
+        # H5: PS1 logic — small GPU (≤8704 MiB) gets reduced spec params.
         if self._gpu and int(self._gpu.total_mib) <= 8704:
             if opts.get("use_mtp"):
                 opts["spec_n_max"] = 1
             opts["spec_deep"] = 1
-        if not opts.get("stage_cells"):
-            opts["stage_cells"] = 81920
+            # PS1 only applies partial staging on 8 GB cards. On 12 GB+ the full
+            # staging buffer keeps prefill fast past the tiered line. Auto-set only
+            # on the small card; user can force it by typing a non-zero stage_cells.
+            if not opts.get("stage_cells"):
+                opts["stage_cells"] = 81920
 
         # M4: auto-compute RAM budget for --cache-ram / --ctx-checkpoints.
         # NOTE: compute_ram_budget returns BYTES (prompt_cache_bytes), but
@@ -962,6 +1255,52 @@ class LaunchTab(QWidget):
                 ck_count = ram_budget.get("checkpoint_count")
                 if ck_count:
                     opts["ram_budget_ckpts"] = int(ck_count)
+        except Exception:
+            pass
+
+        # LT-6: PS1-equivalent launch preparation (capability detection + auto-fills).
+        try:
+            import bonsai_env
+            plan = bonsai_env.prepare_launch(
+                opts, self.cfg,
+                gpu_vram_mib=int(self._gpu.total_mib) if self._gpu else 0,
+                gpu_free_mib=int(self._gpu.free_mib) if self._gpu else 0,
+                gpu_name=str(self._gpu.name) if self._gpu else "",
+                model_path=str(model.path),
+                model_size_gb=float(model.size_gb),
+                model_has_mtp=bool(model.is_mtp_model or (model.mtp_path is not None)),
+            )
+            opts["_prepared_env"] = plan.env
+            opts["_caps"] = plan.caps
+            opts["_listen_host"] = plan.listen_host
+            opts["_listen_port"] = plan.listen_port
+            # Apply auto-filled effective values back into opts (build_args uses them).
+            for k, v in plan.opts.items():
+                if not str(k).startswith("_"):
+                    opts[k] = v
+            if plan.notes:
+                self.info_label.setText(" \u00b7 ".join(plan.notes))
+        except Exception as exc:
+            import traceback
+            self.error_label.setText(f"Launch prep error:\n{traceback.format_exc()}")
+
+        # LT-3: mirror PS1-parity fields into top-level cfg so they persist across
+        # restarts (prepare_launch reads them via getattr(cfg, ...)).
+        for fname in ("force_8gb", "sparse_mode", "rs_replay_mode"):
+            if isinstance(opts.get(fname), int):
+                setattr(self.cfg, fname, int(opts[fname]))
+        if "effort_mode" in opts:
+            self.cfg.effort_mode = str(opts["effort_mode"])
+        for fname in ("mmproj_path", "slot_save_path"):
+            if fname in opts:
+                setattr(self.cfg, fname, str(opts[fname] or ""))
+        for fname in ("mmproj_gpu", "layer_enabled"):
+            if fname in opts:
+                setattr(self.cfg, fname, bool(opts[fname]))
+        if isinstance(opts.get("layer_inner_port"), int):
+            self.cfg.layer_inner_port = int(opts["layer_inner_port"])
+        try:
+            save_config(self.cfg)
         except Exception:
             pass
 
@@ -990,6 +1329,8 @@ class LaunchTab(QWidget):
             self.controller.store.insert_event(
                 "start", pid=info.pid, model_name=info.model_name,
                 ctx=info.ctx_size, kv_type=info.kv_type)
+            # AC-4: start spill guard + layer proxy once server is confirmed running
+            self.controller.start_server_side_services()
 
         def on_error(msg):
             # H6: kill the process if it's still running (wait_for_ready timeout)

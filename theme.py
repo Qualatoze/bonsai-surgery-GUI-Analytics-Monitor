@@ -164,22 +164,29 @@ def _qss(c: dict[str, str | list]) -> str:
     }}
     QTabWidget::pane {{
         border: 1px solid {border};
-        border-radius: 8px;
+        border-radius: 6px;
         background-color: {bg};
+        top: -1px; /* Скрываем верхнюю рамку панели под вкладками */
     }}
     QTabBar::tab {{
         background-color: {card_bg};
         color: {text};
-        padding: 6px 14px;
+        padding: 6px 16px;
         border: 1px solid {border};
         border-bottom: none;
-        border-top-left-radius: 8px;
-        border-top-right-radius: 8px;
+        border-top-left-radius: 6px;
+        border-top-right-radius: 6px;
         margin-right: 2px;
+        margin-bottom: 0px;
+    }}
+    QTabBar::tab:!selected {{
+        margin-top: 2px; /* Неактивные вкладки чуть ниже */
     }}
     QTabBar::tab:selected {{
         background-color: {accent};
         color: white;
+        border-bottom: 2px solid {accent}; /* Перекрываем линию панели */
+        padding-bottom: 7px; /* Компенсация толщины линии */
     }}
     QTabBar::tab:hover:!selected {{
         background-color: {border};

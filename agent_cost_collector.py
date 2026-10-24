@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from data_loader import compute_cost_totals
+from config import AppConfig, internal_host
 from stats_store import StatsStore
 
 logger = logging.getLogger("bonsai.agent_cost_collector")
@@ -60,7 +61,7 @@ class AgentCostCollector(QThread):
         info = self.mgr.current()
         if info is None:
             return None
-        url = f"http://{self.cfg.host}:{self.cfg.port}/metrics"
+        url = f"http://{internal_host(self.cfg)}:{self.cfg.port}/metrics"
         req = urllib.request.Request(url)
         api_key = self._read_api_key()
         if api_key:

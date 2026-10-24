@@ -1,11 +1,13 @@
-# Bonsai 2 27B GUI — .gitignore (GitHub-ready)
-
 # Local config & runtime artifacts
 settings.json
 artifacts/
+logs/
 *.log
 *_out.txt
 *_crash_out*.txt
+temp_out.txt
+*.tmp
+*.bak
 _debug_test*.py
 _probe_*.py
 _repro_*.py
@@ -13,10 +15,16 @@ _smoke_*.py
 _verify_*.py
 architecture.md
 
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
 *.egg-info/
 .eggs/
 .Python
@@ -26,10 +34,20 @@ venv/
 build/
 dist/
 *.spec~
+warn-*.txt
+xref-*.html
+*.toc
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment secrets
+.env
+.env.local
 
 # PyInstaller build output
-build/
-dist/
 *.exe
 *_internal/
 

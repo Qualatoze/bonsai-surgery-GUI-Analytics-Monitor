@@ -12,6 +12,8 @@ from server_manager import ServerManager
 from stats_collector import StatsCollector
 from stats_store import StatsStore
 from agent_cost_collector import AgentCostCollector
+from spill_guard import SpillGuard
+from layer_manager import LayerManager
 
 
 class AppController(QObject):
@@ -37,6 +39,11 @@ class AppController(QObject):
         # NEW: сборщик работы AI-агента (работает и в Performance Mode)
         self.agent_collector = AgentCostCollector(self.cfg, self.mgr, self.store)
         self.tray_available = QSystemTrayIcon.isSystemTrayAvailable()
+
+        # PS1 parity: spill guard + Bonsai layer proxy (started on server start)
+        self.spill_guard = SpillGuard(self)
+        self.layer_manager = LayerManager(self)
+        self.spill_guard.spilled.connect(self._on_spill)
 
         self._performance_mode = False
         self.window = None
@@ -91,6 +98,8 @@ class AppController(QObject):
                                 details=f"stop_server={stop_server}")
         self.collector.stop()
         self.agent_collector.stop()    # NEW
+        self.spill_guard.stop()
+        self.layer_manager.stop()
         if stop_server:
             try:
                 self.mgr.stop()
@@ -107,6 +116,26 @@ class AppController(QObject):
             QThreadPool.globalInstance().waitForDone(500)
         except Exception:
             pass
+
+    def start_server_side_services(self) -> None:
+        """Start spill guard and layer manager when the server is running."""
+        try:
+            self.spill_guard.start()
+        except Exception as exc:
+            print(f"[spill-guard] failed to start: {exc}")
+        try:
+            self.layer_manager.start()
+        except Exception as exc:
+            print(f"[layer-manager] failed to start: {exc}")
+
+    def _on_spill(self, msg: str) -> None:
+        """Handle spill guard warning — surface it in the launch tab."""
+        if self.window:
+            try:
+                tab = self.window.launch_tab
+                tab.info_label.setText(msg)
+            except Exception:
+                pass
 
     # --- performance mode ---
     @property

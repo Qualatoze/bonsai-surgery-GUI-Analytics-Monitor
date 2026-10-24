@@ -93,6 +93,16 @@ EN = {
     "adv.reasoning_budget_message": "Reasoning Budget Message",
     "adv.reasoning_effort_fallback": "Reasoning Fallback Effort",
 
+    # --- PS1 parity selectors & multimodal (Tab 5) ---
+    "adv.effort_mode": "Reasoning Effort",
+    "adv.force_8gb": "8 GB Preset",
+    "adv.sparse_mode": "Sparse Host-Tail",
+    "adv.rs_replay_mode": "Replay Rollback",
+    "adv.mmproj_path": "Vision Projector (mmproj)",
+    "adv.slot_save_path": "Slot Save Folder",
+    "adv.layer_enabled": "Bonsai Layer Proxy",
+    "adv.layer_inner_port": "Layer Inner Port",
+
     # --- Advanced settings — groups ---
     "adv.group.spec_decoding": "Speculative Decoding",
     "adv.group.memory_kv": "Memory & KV Cache",
@@ -276,6 +286,16 @@ RU = {
     "adv.lookup_n": "Lookup N (ngram)",
     "adv.reasoning_budget_message": "Сообщение reasoning budget",
     "adv.reasoning_effort_fallback": "Fallback Effort",
+
+    # --- PS1 parity selectors & multimodal (Tab 5) ---
+    "adv.effort_mode": "Усилие рассуждения",
+    "adv.force_8gb": "Пресет 8 GB",
+    "adv.sparse_mode": "Разреженный Host-Tail",
+    "adv.rs_replay_mode": "Откат Replay",
+    "adv.mmproj_path": "Визуальный проектор (mmproj)",
+    "adv.slot_save_path": "Папка сохранения слотов",
+    "adv.layer_enabled": "Прокси-слой Bonsai",
+    "adv.layer_inner_port": "Внутренний порт слоя",
 
     # --- Advanced settings — группы ---
     "adv.group.spec_decoding": "Спекулятивное декодирование",
@@ -465,6 +485,16 @@ CN = {
     "adv.lookup_n": "Lookup N (ngram)",
     "adv.reasoning_budget_message": "Reasoning Budget Message",
     "adv.reasoning_effort_fallback": "Fallback Effort",
+
+    # --- PS1 parity selectors & multimodal (Tab 5) ---
+    "adv.effort_mode": "推理强度",
+    "adv.force_8gb": "8 GB 预设",
+    "adv.sparse_mode": "稀疏 Host-Tail",
+    "adv.rs_replay_mode": "Replay 回滚",
+    "adv.mmproj_path": "视觉投影器 (mmproj)",
+    "adv.slot_save_path": "Slot 保存文件夹",
+    "adv.layer_enabled": "Bonsai 层代理",
+    "adv.layer_inner_port": "层内部端口",
 
     # --- Advanced settings — groups (CN) ---
     "adv.group.spec_decoding": "投机解码",

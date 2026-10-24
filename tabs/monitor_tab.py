@@ -16,6 +16,8 @@ from resource_monitor import system_ram
 from i18n import t
 from widgets import HintLabel, KpiRow, SectionTitle
 
+from config import internal_host
+
 
 class MonitorTab(QWidget):
     """FIX-A9: показывает stderr и индикатор «Запуск…» во время загрузки модели."""
@@ -98,7 +100,10 @@ class MonitorTab(QWidget):
         self.stderr_view.setReadOnly(True)
         self.stderr_view.setFont(mono)
         self.stderr_view.setPlaceholderText("(stderr пуст — сервер не запущен)")
-        v.addWidget(self.stderr_view, stretch=1)
+        # --- COMPACT: limit terminal height on 1920 screens ---
+        self.stderr_view.setMinimumHeight(120)
+        self.stderr_view.setMaximumHeight(180)
+        v.addWidget(self.stderr_view)   # stretch removed
 
 
     def showEvent(self, e):
@@ -135,7 +140,7 @@ class MonitorTab(QWidget):
         with repeated HTTP calls during startup polling.
         """
         now = _time.time()
-        key = f"http://{self.cfg.host}:{self.cfg.port}/health"
+        key = f"http://{internal_host(self.cfg)}:{self.cfg.port}/health"
         cached = self._health_cache.get(key)
         if cached is not None:
             ts, result = cached
@@ -170,9 +175,12 @@ class MonitorTab(QWidget):
             self.refresh()
             return
 
-        # Показываем tail stderr (only stderr, no stdout/combined)
+        sb = self.stderr_view.verticalScrollBar()
+        at_bottom = sb.value() == sb.maximum()
         tail = self.mgr.tail_stderr(50) or "(stderr ещё пуст — модель грузится…)"
         self.stderr_view.setPlainText(tail)
+        if at_bottom:
+            sb.setValue(sb.maximum())
 
     def refresh(self) -> None:
         """Public entry point for timer-driven UI update."""
@@ -252,8 +260,13 @@ class MonitorTab(QWidget):
                 f"swap {sys_ram['swap_used_mb']:.0f} MB")
 
             # Always show stderr (no tab switching)
+            sb = self.stderr_view.verticalScrollBar()
+            at_bottom = sb.value() == sb.maximum()
             self.stderr_view.setPlainText(
                 self.mgr.tail_stderr(200) or "(пусто)")
+            if at_bottom:
+                sb.setValue(sb.maximum())
+
 
             self._refresh_live_chart()
         except Exception as exc:

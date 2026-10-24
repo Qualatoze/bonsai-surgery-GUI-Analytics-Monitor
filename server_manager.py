@@ -38,7 +38,7 @@ from typing import Optional
 
 import psutil
 
-from config import AppConfig
+from config import AppConfig, internal_host
 from resource_monitor import GpuInfo
 
 
@@ -101,6 +101,13 @@ def scan_models(models_dir: str | Path, min_size_gb: float = 0.09) -> list[Model
             if k and (k in base or base in k):
                 m.mtp_path = v
                 break
+
+    # SM-1: priority sort — base (non-MTP) models first, then their MTP drafts;
+    # within each group largest file first. Keeps the primary model above its
+    # speculative-draft companion in the GUI combo.
+    def _priority(m: ModelInfo) -> tuple[int, float]:
+        return (0 if not m.is_mtp_model else 1, -m.size_gb)
+    models.sort(key=_priority)
     return models
 
 
@@ -456,7 +463,7 @@ class ServerManager:
         info = self.current()
         if not info:
             return False
-        url = f"http://{self.cfg.host}:{self.cfg.port}/health"
+        url = f"http://{internal_host(self.cfg)}:{self.cfg.port}/health"
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             if not self.pid_store.is_alive(info):
@@ -487,18 +494,23 @@ class ServerManager:
         kv = str(opts.get("kv_type", self.cfg.default_kv_cache_type))
         use_mtp = bool(opts.get("use_mtp")) and (model.mtp_path is not None or model.is_mtp_model)
 
+        # SM-4: honor the listen host/port prepared by LaunchTab (layer proxy mode).
+        listen_host = str(opts.get("_listen_host") or self.cfg.host)
+        listen_port = int(opts.get("_listen_port") or self.cfg.port)
         args: list[str] = [
             "--model", str(model.path),
             "--alias", "bonsai-2-27b",
-            "--host", self.cfg.host,
-            "--port", str(self.cfg.port),
+            "--host", listen_host,
+            "--port", str(listen_port),
             "--ctx-size", str(ctx),
             "--cache-type-k", kv,
             "--cache-type-v", kv,
         ]
 
         # --- KV / checkpoint tuning ---
-        if (cells := opts.get("kv_vram_cells")):
+        # Guard on binary support (PS1 gates the same args via $HasTier/$HasHarness).
+        if (cells := opts.get("kv_vram_cells")) \
+           and self._binary_supports("--kv-vram-cells"):
             args += ["--kv-vram-cells", str(int(cells))]
 
         # --- MTP speculative decoding (PrismML fork) ---
@@ -511,16 +523,20 @@ class ServerManager:
             spec_n_max = int(opts.get("spec_n_max", 2))
             args += ["--spec-draft-n-max", str(spec_n_max)]
 
-            # Draft KV type: q8_0 main → q4_0 draft (saves VRAM, from .ps1)
-            draft_kv = "q4_0" if kv == "q8_0" else kv
+            # SM-3a: draft uses the same KV type as the main model (PS1 parity).
+            draft_kv = kv
             args += ["-ctkd", draft_kv, "-ctvd", draft_kv]
 
-            # Depth/window limit (from .ps1 logic)
-            if opts.get("kv_vram_cells"):
-                draft_window = int(opts.get("draft_window", 16384))
+            # Draft window. PS1 uses --spec-draft-window whenever the engine has
+            # the tiered-KV runtime (independent of kv_vram_cells). The
+            # --spec-draft-n-max-tail only matters when the VRAM line splits KV
+            # (kv_vram_cells > 0). --spec-draft-depth-max is the legacy fallback.
+            draft_window = int(opts.get("draft_window", self.cfg.draft_window or 16384))
+            if self._binary_supports("--spec-draft-window"):
                 args += ["--spec-draft-window", str(draft_window)]
-                spec_n_max_tail = int(opts.get("spec_deep", 4))
-                args += ["--spec-draft-n-max-tail", str(spec_n_max_tail)]
+                if opts.get("kv_vram_cells"):
+                    spec_n_max_tail = int(opts.get("spec_deep", 4))
+                    args += ["--spec-draft-n-max-tail", str(spec_n_max_tail)]
             else:
                 depth_max = int(opts.get("spec_depth", self.cfg.spec_depth or 24576))
                 args += ["--spec-draft-depth-max", str(depth_max)]
@@ -529,13 +545,15 @@ class ServerManager:
             if lookup_n > 0:
                 args += ["--spec-lookup-n-max", str(lookup_n)]
 
-        # --- Sampling / generation params ---
-        temp = float(opts.get("temp", self.cfg.temp))
-        top_p = float(opts.get("top_p", self.cfg.top_p))
-        repeat_penalty = float(opts.get("repeat_penalty", self.cfg.repeat_penalty))
-        top_k = int(opts.get("top_k", self.cfg.top_k))
-        args += ["--temp", str(temp), "--top-p", str(top_p),
-                 "--repeat-penalty", str(repeat_penalty), "--top-k", str(top_k)]
+        # --- Sampling / generation params (PS1 defaults) ---
+        temp = float(opts.get("temp", 1.0))
+        top_p = float(opts.get("top_p", 0.95))
+        top_k = int(opts.get("top_k", 20))
+        args += ["--temp", str(temp), "--top-p", str(top_p), "--top-k", str(top_k)]
+        # SM-3b: PS1 emits --repeat-penalty only when the user set a non-default value.
+        rp = opts.get("repeat_penalty")
+        if rp is not None and float(rp) != 1.0:
+            args += ["--repeat-penalty", str(float(rp))]
 
         # --- Architecture / GPU layer mapping ---
         ngl = int(opts.get("ngl", self.cfg.ngl))
@@ -544,9 +562,8 @@ class ServerManager:
         # --- Attention / FA tuning ---
         batch = int(opts.get("batch_size", 0)) or self.cfg.batch_size
         if not batch:
-            # FIX-A7: .ps1: 1024 для <=12GB, 2048 для >12GB
-            gpu_vram = opts.get("_gpu_vram_mib", 0)
-            batch = 1024 if (not gpu_vram or gpu_vram <= 12288) else 2048
+            # PS1 sends -b 2048 for every card; the user can still override.
+            batch = 2048
         args += ["-b", str(batch)]
         args += ["-fa", "on", "-np", "1"]
         # --- Physical batch size (from .ps1) ---
@@ -575,33 +592,37 @@ class ServerManager:
         effort = str(opts.get("effort", self.cfg.effort))
         harness_proof = bool(opts.get("harness_proof", self.cfg.harness_proof))
 
-        if effort in ("low", "medium", "high"):
-            if harness_proof:
-                # .ps1: --reasoning-effort-allow medium,<Effort>
-                args += ["--reasoning-effort-allow", f"medium,{effort}"]
-            else:
-                args += ["--reasoning-effort-allow", effort]
+        # PS1 only sends --reasoning-effort-allow under harness_proof; the default
+        # effort is already applied through LLAMA_ARG_CHAT_TEMPLATE_KWARGS below.
+        if effort in ("low", "medium", "high") and harness_proof \
+           and self._binary_supports("--reasoning-effort-allow"):
+            args += ["--reasoning-effort-allow", f"medium,{effort}"]
 
-        # FIX-A7: критические аргументы из .ps1, отсутствовавшие в GUI
+        # PS1 logic: --reasoning-budget-message is ALWAYS passed (injects the
+        # message before </think> when the budget trips). The
+        # --reasoning-max-tokens-floor is part of harness_proof only.
         think_budget = int(opts.get("think_budget", self.cfg.think_budget))
         n_predict = max(24576, think_budget + 4096)
         args += ["--reasoning-budget", str(think_budget), "-n", str(n_predict)]
 
+        if think_budget >= 0:
+            msg = opts.get("reasoning_budget_message", "Now produce the complete answer.")
+            if msg and self._binary_supports("--reasoning-budget-message"):
+                args += ["--reasoning-budget-message", str(msg)]
+
         if harness_proof:
             fallback = str(opts.get("reasoning_effort_fallback", "medium"))
-            args += ["--reasoning-effort-fallback", fallback]
-            args += ["--reasoning-max-tokens-floor", str(think_budget + 4096)]
-
-            msg = opts.get("reasoning_budget_message")
-            if msg:
-                args += ["--reasoning-budget-message", str(msg)]
+            if self._binary_supports("--reasoning-effort-fallback"):
+                args += ["--reasoning-effort-fallback", fallback]
+            if think_budget >= 0 and self._binary_supports("--reasoning-max-tokens-floor"):
+                args += ["--reasoning-max-tokens-floor", str(think_budget + 4096)]
 
         args.append("--jinja")
 
         # --- Cache RAM / ctx checkpoints ---
-        if opts.get("ram_budget_cache_mib"):
-            args += ["--cache-ram", str(int(opts["ram_budget_cache_mib"]))]
-        if opts.get("ram_budget_ckpts"):
+        if opts.get("ram_budget_cache") and self._binary_supports("--cache-ram"):
+            args += ["--cache-ram", str(int(opts["ram_budget_cache"]))]
+        if opts.get("ram_budget_ckpts") and self._binary_supports("--ctx-checkpoints"):
             args += ["--ctx-checkpoints", str(int(opts["ram_budget_ckpts"]))]
 
         # --- Always-on server args (from start-server.ps1) ---
@@ -610,13 +631,34 @@ class ServerManager:
             args += ["--fit", "off"]
         args += ["--prio", "2", "--poll", "100", "--metrics"]
 
-        # --- API key ---
-        if (key := self._read_api_key()):
-            args += ["--api-key", key]
+        # SM-3c: multimodal (mmproj) + slot-save-path (PS1 parity).
+        mmproj = str(opts.get("mmproj_path") or self.cfg.mmproj_path or "").strip()
+        if mmproj and Path(mmproj).is_file():
+            args += ["--mmproj", mmproj]
+            if not getattr(self.cfg, "mmproj_gpu", False):
+                args.append("--no-mmproj-offload")
+        slot_save = str(opts.get("slot_save_path") or self.cfg.slot_save_path or "").strip()
+        if slot_save:
+            args += ["--slot-save-path", slot_save]
+
+        # --- API key (opt-in; matches start-server.ps1 default of no auth) ---
+        # Priority: opts.api_key_value (from Advanced Settings UI)
+        #          → api_key_path file (fallback for advanced users)
+        #          → no --api-key (open server, any Bearer accepted)
+        if opts.get("api_key_enabled"):
+            api_key = str(opts.get("api_key_value") or "").strip()
+            if not api_key:
+                api_key = self._read_api_key() or ""
+            if api_key:
+                args += ["--api-key", api_key]
 
         # --- Extra raw args (last, so user can override) ---
+        import shlex
         if (extra := str(opts.get("extra_args", "")).strip()):
-            args += extra.split()
+            try:
+                args += shlex.split(extra)
+            except ValueError:
+                args += extra.split()
 
         return args
 
@@ -644,128 +686,29 @@ class ServerManager:
         return flag in self._help_cache.get(cache_key, "")
 
     def _build_env(self, opts: dict) -> dict[str, str]:
-        """Build environment variables for BONSAI_* and GGML_CUDA_* settings.
+        """Build environment variables for BONSAI_* / GGML_CUDA_* settings.
 
-        FIX-A6: дефолты из cfg (не 0), критические env vars из .ps1:
-          - LLAMA_ARG_CHAT_TEMPLATE_KWARGS (критично для reasoning/think)
-          - GGML_CUDA_BATCH_INVARIANT (для MTP)
-          - GGML_CUDA_FA_PREFILL_F16 (числовое значение, не '1')
+        SM-2/SM-2b: delegate to bonsai_env.prepare_launch — the single source of
+        truth for PS1-equivalent env decisions (capability detection, auto-fills,
+        stale-env cleanup). Prefer the plan already prepared by LaunchTab
+        (_prepared_env); otherwise prepare here as a fallback.
         """
-        env = os.environ.copy()
-
-        if opts.get("bonsai_8gb"):
-            env["BONSAI_8GB"] = "1"
-
-        # FIX-A7: .ps1 ставит BONSAI_HOST=0.0.0.0 для LAN-доступа
-        # GUI использует --host из cfg, но env var тоже может быть полезен
-        if not env.get("BONSAI_HOST"):
-            env["BONSAI_HOST"] = self.cfg.host
-
-        # Shared pool / memory pooling (FIX-A6: дефолт из cfg)
-        shared_pool = bool(opts.get("shared_pool", self.cfg.shared_pool))
-        if shared_pool:
-            env["GGML_CUDA_SHARED_POOL"] = "1"
-        pool_mib = int(opts.get("pool_mib", self.cfg.pool_mib))
-        if pool_mib:
-            env["BONSAI_POOL_MIB"] = str(pool_mib)
-
-        # MTP draft micro-batch (FIX-A6: дефолт из cfg)
-        ubatch = int(opts.get("ubatch", self.cfg.ubatch))
-        if ubatch:
-            env["LLAMA_MTP_DRAFT_UBATCH"] = str(ubatch)
-
-        # FA prefill / chunk tuning (FIX-A6: .ps1 использует числовые значения, не '1')
-        # ВАЖНО: в диалоге это bool (чекбокс). True → enable with value, False → "0" (disable),
-        # int/None → use as-is if > 0, don't set if 0.
-        pf_val = opts.get("prefill_f16", self.cfg.prefill_f16)
-        if isinstance(pf_val, bool):
-            if pf_val:
-                # Determine value based on MTP usage (smaller chunk for MTP)
-                use_mtp_check = bool(opts.get("use_mtp"))
-                pf_val = 32768 if use_mtp_check else 65536
-            else:
-                # H4: don't set env var — binary default is enabled (PS1 behavior)
-                pf_val = 0
-        elif not isinstance(pf_val, int):
-            try:
-                pf_val = int(pf_val)
-            except (TypeError, ValueError):
-                pf_val = 0
-        if pf_val > 0:
-            env["GGML_CUDA_FA_PREFILL_F16"] = str(pf_val)
-
-        fc_val = opts.get("fa_chunk", self.cfg.fa_chunk)
-        if isinstance(fc_val, bool):
-            if fc_val:
-                fc_val = 32768
-            else:
-                # H4: don't set env var — binary default is enabled (PS1 behavior)
-                fc_val = 0
-        elif not isinstance(fc_val, int):
-            try:
-                fc_val = int(fc_val)
-            except (TypeError, ValueError):
-                fc_val = 0
-        if fc_val > 0:
-            env["GGML_CUDA_FA_CHUNK"] = str(fc_val)
-
-        # KV tier staging (FIX-A6: дефолт из cfg)
-        stage_cells = int(opts.get("stage_cells", self.cfg.stage_cells))
-        if stage_cells:
-            env["BONSAI_STAGE_CELLS"] = str(stage_cells)
-
-        # Checkpoint every N tokens (FIX-A6: дефолт из cfg, .ps1 использует 8192)
-        ckpt_every = int(opts.get("ckpt_every", self.cfg.ckpt_every))
-        if ckpt_every:
-            env["BONSAI_CKPT_EVERY"] = str(ckpt_every)
-            env["LLAMA_ARG_CHECKPOINT_EVERY_NT"] = str(ckpt_every)
-
-        # Speculative decoding (FIX-A6: дефолты из cfg)
-        spec_n_max = int(opts.get("spec_n_max", 2))
-        if spec_n_max:
-            env["BONSAI_SPEC"] = str(spec_n_max)
-        spec_deep = int(opts.get("spec_deep", self.cfg.spec_deep))
-        if spec_deep:
-            env["BONSAI_SPEC_DEEP"] = str(int(spec_deep))
-        draft_window = int(opts.get("draft_window", self.cfg.draft_window))
-        if draft_window:
-            env["BONSAI_DRAFT_WINDOW"] = str(draft_window)
-
-        # KQ mask packed (FIX-A6: дефолт из cfg) — имя env из .ps1
-        kq_mask_packed = bool(opts.get("kq_mask_packed", self.cfg.kq_mask_packed))
-        if kq_mask_packed:
-            env["LLAMA_ARG_KQ_MASK_PACKED"] = "1"
-
-        # Think mode (FIX-A6: дефолт из cfg)
-        think = bool(opts.get("think", self.cfg.think))
-        if think:
-            env["BONSAI_THINK"] = "1"
-        think_budget = int(opts.get("think_budget", self.cfg.think_budget))
-        if think_budget:
-            env["BONSAI_THINK_BUDGET"] = str(think_budget)
-
-        # FIX-A6: КРИТИЧЕСКИЙ env var из .ps1 — chat template kwargs для reasoning
-        # Без этого --reasoning-effort-allow не работает корректно.
-        # Когда think=False, добавляем "enable_thinking": false чтобы шаблон
-        # не генерировал thinking (иначе undefined → xhigh).
-        effort_val = str(opts.get("effort", self.cfg.effort))
-        kwargs = {"reasoning_effort": effort_val}
-        if not think:
-            kwargs["enable_thinking"] = False
-        env["LLAMA_ARG_CHAT_TEMPLATE_KWARGS"] = json.dumps(kwargs)
-
-        # Harness proof (FIX-A6: дефолт из cfg)
-        harness_proof = bool(opts.get("harness_proof", self.cfg.harness_proof))
-        if harness_proof:
-            env["BONSAI_HARNESS_PROOF"] = "1"
-
-        # FIX-A6: GGML_CUDA_BATCH_INVARIANT — критично для MTP (из .ps1)
-        use_mtp = bool(opts.get("use_mtp"))
-        spec_depth = int(opts.get("spec_depth", self.cfg.spec_depth))
-        if use_mtp and spec_depth > 0:
-            env["GGML_CUDA_BATCH_INVARIANT"] = "1"
-
-        return env
+        if opts.get("_prepared_env"):
+            return dict(opts["_prepared_env"])
+        try:
+            import bonsai_env
+        except ImportError:
+            return {}
+        plan = bonsai_env.prepare_launch(
+            opts, self.cfg,
+            gpu_vram_mib=int(opts.get("_gpu_vram_mib", 0) or 0),
+            gpu_free_mib=int(opts.get("_gpu_free_mib", 0) or 0),
+            gpu_name=str(opts.get("_gpu_name", "") or ""),
+            model_path=str(opts.get("model_path", "") or ""),
+            model_size_gb=float(opts.get("_model_size_gb", 0.0) or 0.0),
+            model_has_mtp=bool(opts.get("use_mtp")),
+        )
+        return plan.env
 
     def _read_api_key(self) -> Optional[str]:
         p = Path(self.cfg.api_key_path)

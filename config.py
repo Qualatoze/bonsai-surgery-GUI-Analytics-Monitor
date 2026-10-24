@@ -130,6 +130,9 @@ class AppConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     api_endpoint: str = "http://localhost:8080/v1"
+    # --- API key auth (opt-in; matches start-server.ps1 default of no --api-key) ---
+    api_key_enabled: bool = False        # OFF → open server, any Bearer accepted
+    api_key_value: str = ""              # actual key (empty → fallback to api_key_path file)
 
     # --- GPU / VRAM ---
     small_gpu_threshold_mib: int = 8704   # 8GB карты: 8192 MiB + запас
@@ -210,6 +213,17 @@ class AppConfig:
 
     # --- theme ---
     theme_name: str = "one_dark"         # dracula | solarized_dark | solarized_light | nord | monokai | one_dark | github_dark | tokyo_night
+
+    # --- PS1 parity (start-server.ps1) ---
+    mmproj_path: str = ""                # multimodal projection .gguf path (blank = off)
+    mmproj_gpu: bool = False             # offload mmproj to GPU
+    slot_save_path: str = ""             # --slot-save-path (saved conversations / slots)
+    layer_enabled: bool = False          # Bonsai layer proxy on/off
+    layer_inner_port: int = 0            # inner port for the layer proxy (0 = auto)
+    effort_mode: str = "medium"          # low | medium | high | xhigh
+    force_8gb: int = -1                  # -1 auto, 0 off, 1 force-8GB-card
+    sparse_mode: int = -1                # -1 auto, 0 off, 1 on (sparse FA)
+    rs_replay_mode: int = -1             # -1 auto, 0 off, 1 on (RS_REPLAY rollback)
 
     # --- advanced server opts (полный dict из AdvancedSettingsDialog; переживает перезапуск) ---
     advanced_opts: dict = field(default_factory=dict)
@@ -376,6 +390,11 @@ class AppConfig:
             ("batch_size", 0, 1_048_576),
             ("ngl", 1, 1024),
             ("last_context_length", 1024, 1_048_576),
+            # --- PS1 parity int fields ---
+            ("layer_inner_port", 0, 65535),
+            ("force_8gb", -1, 1),
+            ("sparse_mode", -1, 1),
+            ("rs_replay_mode", -1, 1),
         ):
             try:
                 val = int(getattr(cfg, fname))
@@ -405,6 +424,9 @@ class AppConfig:
             "shared_pool", "prefill_f16", "fa_chunk", "think",
             "harness_proof", "backend_sampling", "kq_mask_packed",
             "start_in_performance_mode",
+            "api_key_enabled",              # ← NEW: matches PS1 ($ApiKey = $null)
+            # --- PS1 parity bool fields ---
+            "mmproj_gpu", "layer_enabled",
         ):
             val = getattr(cfg, fname)
             if isinstance(val, bool):
@@ -437,7 +459,10 @@ class AppConfig:
             "chart_granularity", "accent_color", "language", "stats_db_path",
             "last_selected_model_path",
             # --- advanced string fields ---
-            "effort", "currency",
+            "effort", "currency", "effort_mode",
+            "api_key_value",                # ← NEW: actual API key value
+            # --- PS1 parity string fields ---
+            "mmproj_path", "slot_save_path",
         ):
             if not isinstance(getattr(cfg, fname, None), str):
                 setattr(cfg, fname, getattr(defaults, fname))
@@ -453,6 +478,9 @@ class AppConfig:
             cfg.language = "en"
         if cfg.effort not in ("low", "medium", "high"):
             cfg.effort = "medium"
+        # --- PS1 parity enum field ---
+        if cfg.effort_mode not in ("low", "medium", "high", "xhigh"):
+            cfg.effort_mode = "medium"
         if cfg.last_kv_cache_type not in ("q8_0", "q5_0", "q4_0", "f16"):
             cfg.last_kv_cache_type = "q8_0"
 
@@ -534,6 +562,18 @@ def save_config(cfg: AppConfig, path: str | os.PathLike | None = None) -> None:
     tmp = p.with_suffix(p.suffix + ".tmp")
     tmp.write_text(json.dumps(cfg.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, p)  # атомарно на Windows и POSIX
+
+
+def internal_host(cfg: "AppConfig") -> str:
+    """Host to use for *local* HTTP checks (/health, /metrics).
+
+    cfg.host is a bind address (default "0.0.0.0"). For local health/metrics
+    probes we must dial loopback instead of the wildcard bind target.
+    """
+    h = (cfg.host or "").strip()
+    if h in ("", "0.0.0.0", "::", "[::]"):
+        return "127.0.0.1"
+    return h
 
 
 # ---------------------------------------------------------------------------
