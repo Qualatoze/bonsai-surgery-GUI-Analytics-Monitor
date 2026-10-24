@@ -3,11 +3,11 @@ UI language: **RU · EN · CN**
 
 | Launch | Monitor |
 | :---: | :---: |
-| <img src="https://i.imgur.com/fWX2BCf.png" width="400" alt="Launch Tab"> | <img src="https://i.imgur.com/ECtvP2U.png" width="400" alt="Monitor Tab"> |
+| <img src="https://i.imgur.com/jHcVLr8.png" width="400" alt="Launch Tab"> | <img src="https://i.imgur.com/arJeUQU.png" width="400" alt="Monitor Tab"> |
 
 | Analytics | Settings |
 | :---: | :---: |
-| <img src="https://i.imgur.com/2JaG24Y.png" width="400" alt="Analytics Tab"> | <img src="https://i.imgur.com/tD3IEFk.png" width="400" alt="Settings Tab"> |
+| <img src="https://i.imgur.com/GGg6wN3.png" width="400" alt="Analytics Tab"> | <img src="https://i.imgur.com/66HL9Mv.png" width="400" alt="Settings Tab"> |
 
 ## Install
 
