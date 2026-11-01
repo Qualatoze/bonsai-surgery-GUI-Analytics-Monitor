@@ -70,3 +70,4 @@ desktop.ini
 
 # Streamlit (legacy)
 .streamlit/secrets.toml
+run.ps1

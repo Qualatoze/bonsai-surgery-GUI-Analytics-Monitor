@@ -484,6 +484,10 @@ class AppConfig:
         if cfg.last_kv_cache_type not in ("q8_0", "q5_0", "q4_0", "f16"):
             cfg.last_kv_cache_type = "q8_0"
 
+        # PS1 parity migration: старый settings.json мог сохранить loopback.
+        if cfg.host == "127.0.0.1":
+            cfg.host = "0.0.0.0"
+
         # --- theme_name validation ---
         valid_themes = (
             "dracula", "solarized_dark", "solarized_light", "nord",

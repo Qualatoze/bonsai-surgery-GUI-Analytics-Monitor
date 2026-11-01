@@ -495,7 +495,13 @@ class ServerManager:
         use_mtp = bool(opts.get("use_mtp")) and (model.mtp_path is not None or model.is_mtp_model)
 
         # SM-4: honor the listen host/port prepared by LaunchTab (layer proxy mode).
-        listen_host = str(opts.get("_listen_host") or self.cfg.host)
+        # PS1 parity: LAN-binding по умолчанию. 127.0.0.1 — только для layer-прокси.
+        if opts.get("_listen_host"):
+            listen_host = str(opts["_listen_host"])
+        elif getattr(self.cfg, "layer_enabled", False):
+            listen_host = "127.0.0.1"
+        else:
+            listen_host = "0.0.0.0"
         listen_port = int(opts.get("_listen_port") or self.cfg.port)
         args: list[str] = [
             "--model", str(model.path),

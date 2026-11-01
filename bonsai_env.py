@@ -446,10 +446,8 @@ def prepare_launch(opts: dict, cfg, *, gpu_vram_mib: int = 0,
         if k.startswith("GGML_CUDA_FA_SPARSE_"):
             env.pop(k, None)
 
-    if cfg.host in ("0.0.0.0", "::", ""):
-        listen_host = "0.0.0.0"
-    else:
-        listen_host = cfg.host
+    # PS1 parity: llama-server всегда слушает 0.0.0.0 (LAN),
+    # на 127.0.0.1 уходит только когда включён layer-прокси.
     public_port = int(cfg.port)
     layer_on = bool(getattr(cfg, "layer_enabled", False))
     if layer_on:
@@ -457,6 +455,7 @@ def prepare_launch(opts: dict, cfg, *, gpu_vram_mib: int = 0,
         listen_host = "127.0.0.1"
         listen_port = inner
     else:
+        listen_host = "0.0.0.0"
         listen_port = public_port
 
     if force == 1:
